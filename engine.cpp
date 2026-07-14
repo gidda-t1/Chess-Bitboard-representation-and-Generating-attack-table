@@ -35,11 +35,9 @@ enum{black,white, both};
 enum{bishop, rook};   
 
 
-// ==================================
- 
+// ===================================================================================
 //           Chess board
- 
-//  ==================================
+//  ==================================================================================
 
 //                             WHITE PIECES
 
@@ -153,6 +151,7 @@ enum {P,N,B,R,Q,K,p,n,b,r,q,k};
 const char ascii_pieces[] = "PNBRQKpnbrqk";
 const char *unicode_pieces[] = {"♟︎", "♞", "♝", "♜", "♛", "♚", "♙", "♘", "♗", "♖", "♕", "♔"  };  
 int char_pieces[128];
+char promoted_pieces[128];
 
 void init_pieces()
 {
@@ -164,6 +163,39 @@ void init_pieces()
     char_pieces['r'] = r,char_pieces['q'] = q,char_pieces['k'] = k;
 }
  
+void init_promoted_pieces()
+{
+    for(int i=0;i<12;i++) char_pieces[i] = -1;
+    promoted_pieces[N] = 'n',promoted_pieces[B] = 'b';
+    promoted_pieces[R] = 'r',promoted_pieces[Q] = 'q',
+
+    promoted_pieces[n] = 'n',promoted_pieces[b] = 'b';
+    promoted_pieces[r] = 'r',promoted_pieces[q] = 'q';
+}
+
+
+// =============================================================================================
+//                          Preserving and restoring positions
+// =============================================================================================
+
+// preserve board state
+#define copy_board()                                                      \
+    U64 bitboards_copy[12], occupancies_copy[3];                          \
+    int side_copy, enpassant_copy, castle_copy;                           \
+    memcpy(bitboards_copy, bitboards, 96);                                \
+    memcpy(occupancies_copy, occupancies, 24);                            \
+    side_copy = side, enpassant_copy = enpassant, castle_copy = castle;   \
+
+// restore board state
+#define take_back()                                                       \
+    memcpy(bitboards, bitboards_copy, 96);                                \
+    memcpy(occupancies, occupancies_copy, 24);                            \
+    side = side_copy, enpassant = enpassant_copy, castle = castle_copy;   \
+
+
+
+
+
 
 
 //edge in the chess board
@@ -324,14 +356,6 @@ void parser_fen(const char* fen)
     occupancies[both] |= occupancies[black];
     return;
 }
-
-
-
-
-
-
-
-
 
 // ===================================
 //             ATTACK TABLES
@@ -778,6 +802,7 @@ void generate_attack_table()
 void init_all()
 {
     init_pieces();
+    init_promoted_pieces();
     generate_attack_table();
     init_slider_attacks(1); //1 for bishop 
     init_slider_attacks(0);  // 0 for rook
@@ -828,14 +853,109 @@ void print_attacked_square(int side)
 }
 
 
+// =================================================================
+//                 Binary formatting of move
+// =================================================================
+
+//To encode and decode a move for later evalution while doing alpha beta pruning
+// 0000 0000 0000 0000 0011 1111    source square               ---> 6 bits 
+// 0000 0000 0000 1111 1100 0000    target square               ---> 6 bits
+// 0000 0000 1111 0000 0000 0000    piece moved                 ---> 4 bits
+// 0000 1111 0000 0000 0000 0000    promoted piece              ---> 4 bits
+// 0001 0000 0000 0000 0000 0000    capture flag                ---> 1 bits
+// 0010 0000 0000 0000 0000 0000    double push flag            ---> 1 bits
+// 0100 0000 0000 0000 0000 0000    enpassant flag              ---> 1 bits
+// 1000 0000 0000 0000 0000 0000    castling flag               ---> 1 bits
+
+//encoder
+static inline int encode_move(int source, int target, int piece, int promoted, int capture, int doublePush, int enpassant, int castling)
+{
+    return (source) | (target<<6) | (piece<<12) | (promoted<<16) | (capture<<20) | (doublePush<<21) | (enpassant<<22) | (castling<<23);
+}
+//decoder
+static inline int get_source(int move) {return move & 0x3f;}
+static inline int get_target(int move) {return (move>>6) & (0x3f);}
+static inline int get_piece(int move) {return (move>>12) & (0xf);}
+static inline int get_promoted(int move) {return (move>>16) & (0xf);}
+static inline int get_capture(int move) {return (move>>20) & (1);}
+static inline int get_doublePush(int move) {return (move>>21) & (1);}
+static inline int get_enpassant(int move) {return (move>>22) & (1);}
+static inline int get_castling(int move) {return (move>>23) & (1);}
+
+
+//Printing move (for UCI purpose)
+void print_move(int move)
+{
+    std::cout<<square_to_coordinates[get_source(move)]
+             <<square_to_coordinates[get_target(move)]
+             << promoted_pieces[get_promoted(move)]
+             <<"\n";
+}
+
+
+
+
+// ==========================================================
+//                         Movelists
+// ==========================================================
+struct moves
+{
+    int list[256]; // for a position there are atmost 218 move available
+    int count; // counter to know how many moves do i have
+};
+
+// printing all the moves in the movelist
+void  print_move_lists(moves* move_list)
+{
+
+    if(move_list->count==0) 
+    {
+        std::cout<<"No moves in the List \n";
+        return ;
+    }
+
+    std::cout<<"\n     Move        Piece       Capture     Double      Enpas       Castling\n\n";
+    std::cout<<"      ";
+
+
+    for(int move_counter =0; move_counter<move_list->count; move_counter++ )
+    {
+        std::cout<<square_to_coordinates[get_source(move_list->list[move_counter])]
+                 <<square_to_coordinates[get_target(move_list->list[move_counter])];
+        int promoted_piece = get_promoted(move_list->list[move_counter]);
+        if(promoted_piece) std::cout<<promoted_pieces[promoted_piece];
+        std::cout<<"          "<<unicode_pieces[get_piece(move_list->list[move_counter])];
+        std::cout<<"           "<<get_capture(move_list->list[move_counter]);
+        std::cout<<"           "<<get_doublePush(move_list->list[move_counter]);
+        std::cout<<"           "<<get_enpassant(move_list->list[move_counter]);
+        std::cout<<"           "<<get_castling(move_list->list[move_counter])<<"\n      ";
+    }
+
+    std::cout<<"    Total number of moves : "<<move_list->count<<"\n";
+
+}
+
+//function for adding a move into the movelist;
+static inline void addMove (moves* move_list, int move)
+{
+    int* counter = &move_list->count;
+    move_list->list[*counter] = move;
+    (*counter)++; 
+}
+
+
+
 
 // =======================================================================
 //                             Generating moves
 // =======================================================================
-void generate_moves()
+void generate_moves(moves* moveList)
 {
+    moveList->count = 0;
+
     int source_sq, target_sq;
     U64 bitboard, attack;
+    int move;
 
    
     
@@ -858,16 +978,31 @@ void generate_moves()
                         // Pawn promotion
                         if(target_sq>=a8 && target_sq<=h8)
                         {
-                            std:: cout<< square_to_coordinates[source_sq]<<square_to_coordinates[target_sq]<<" : Pawn Promotion\n";
+                            // std:: cout<< square_to_coordinates[source_sq]<<square_to_coordinates[target_sq]<<" : Pawn Promotion\n";
+                            move = encode_move(source_sq, target_sq, P, Q, 0, 0, 0, 0);
+                            addMove(moveList, move);
+                            move = encode_move(source_sq, target_sq, P, R, 0, 0, 0, 0);
+                            addMove(moveList, move);
+                            move = encode_move(source_sq, target_sq, P, N, 0, 0, 0, 0);
+                            addMove(moveList, move);
+                            move = encode_move(source_sq, target_sq, P, B, 0, 0, 0, 0);
+                            addMove(moveList, move);
                         }
                         else //one move ahead, two move ahead
                         {
-                            std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[target_sq]<<" : Pawn push \n";
+                            // std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[target_sq]<<" : Pawn push \n"
+                            move = encode_move(source_sq, target_sq, P, 0, 0, 0, 0, 0);
+                            addMove(moveList, move);
                             if(source_sq>=a2 && source_sq<=h2) //two move is possible
                             {
                                 //can i push for 2 squares?
                                 target_sq = source_sq - 16;
-                                if(!get_bit(occupancies[both], target_sq)) std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[target_sq]<<" : Pawn double push \n";
+                                if(!get_bit(occupancies[both], target_sq)) 
+                                {
+                                    // std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[target_sq]<<" : Pawn double push \n";
+                                    move = encode_move(source_sq, target_sq, P, 0, 0, 1, 0, 0);
+                                    addMove(moveList, move);
+                                }
                             }
                         }
                     }
@@ -882,9 +1017,23 @@ void generate_moves()
                             //Promotion capture
                             if(source_sq>=a7 && source_sq<=h7) 
                             {
-                                std::cout<< square_to_coordinates[source_sq]<<square_to_coordinates[target_attack]<<" : Pawn promotion caputre\n";
+                                // std::cout<< square_to_coordinates[source_sq]<<square_to_coordinates[target_attack]<<" : Pawn promotion caputre\n";
+                                move = encode_move(source_sq, target_attack, P, Q, 1, 0, 0, 0);
+                                addMove(moveList, move);
+                                move = encode_move(source_sq, target_attack, P, R, 1, 0, 0, 0);
+                                addMove(moveList, move);
+                                move = encode_move(source_sq, target_attack, P, N, 1, 0, 0, 0);
+                                addMove(moveList, move);
+                                move = encode_move(source_sq, target_attack, P, B, 1, 0, 0, 0);
+                                addMove(moveList, move);
+
                             }
-                            else std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[target_attack]<<" : Pawn capture\n";
+                            else 
+                            {
+                                // std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[target_attack]<<" : Pawn capture\n";
+                                move = encode_move(source_sq, target_attack, P, 0, 1, 0, 0, 0);
+                                addMove(moveList, move); 
+                            }
                             unset_bit(attack, target_attack);
                         }
                     
@@ -892,9 +1041,13 @@ void generate_moves()
                         if(enpassant_sq!= no_sq)
                         {
                             attack = (1ULL<<enpassant_sq) & pawn_attacks[white][source_sq];
-                            if(attack) std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[enpassant_sq]<<" : Enpassant capture \n";
+                            if(attack) 
+                            {
+                                // std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[enpassant_sq]<<" : Enpassant capture \n";
+                                move = encode_move(source_sq, enpassant_sq, P, 0, 1, 0, 1, 0);
+                                addMove(moveList, move);
+                            }
                         }
-
                     //poping the lsb
                     unset_bit(bitboard, source_sq);  
                 }   
@@ -904,17 +1057,20 @@ void generate_moves()
             {
                 if(castle & wk)
                 {
-                    if(get_bit(occupancies[both], f1) || get_bit(occupancies[both], g1)) std::cout<<"Not Possible 0-0 for white\n";
-                    else if(is_square_attacked(e1, black) || is_square_attacked(f1, black) || is_square_attacked(g1, black))  std::cout<<"Not Possible 0-0 for white\n";
-                    else std::cout<<"0-0 is possible for white\n";
+                    if(!is_square_attacked(e1,black) && !is_square_attacked(f1,black) && !is_square_attacked(g1,black) && !(occupancies[both]&(1ULL<<f1)) && !(occupancies[both]&(1ULL<<g1)))
+                    {
+                        move = encode_move(e1, g1, K, 0, 0, 0, 0, 1);
+                        addMove(moveList, move);
+                    }
                 }
                 if(castle & wq)
                 {
-                    if(get_bit(occupancies[both], b1) || get_bit(occupancies[both], c1) || get_bit(occupancies[both], d1) ) std::cout<<"Not Possible 0-0-0 for white\n";
-                    else if(is_square_attacked(e1, black) || is_square_attacked(d1, black) || is_square_attacked(c1, black))  std::cout<<"Not Possible 0-0-0 for white\n";
-                    else std::cout<<"0-0-0 is possible for white\n";
+                    if( !is_square_attacked(c1,black) &&  !is_square_attacked(d1,black) && !is_square_attacked(e1,black)  && !(occupancies[both]&(1ULL<<b1)) && !(occupancies[both]&(1ULL<<c1)) && !(occupancies[both]&(1ULL<<d1)))
+                    {
+                        move = encode_move(e1, c1, K, 0, 0, 0, 0, 1);
+                        addMove(moveList, move);
+                    }
                 }
-                if(!(castle&wk) && !(castle&wq)) std::cout<<"NO castling available\n";
             }
         }
 
@@ -935,16 +1091,31 @@ void generate_moves()
                         // Pawn promotion
                         if(target_sq>=a1 && target_sq<=h1)
                         {
-                            std:: cout<< square_to_coordinates[source_sq]<<square_to_coordinates[target_sq]<<" : Pawn Promotion\n";
+                            // std:: cout<< square_to_coordinates[source_sq]<<square_to_coordinates[target_sq]<<" : Pawn Promotion\n";
+                            move = encode_move(source_sq, target_sq, p, q, 0, 0, 0, 0);
+                            addMove(moveList, move);
+                            move = encode_move(source_sq, target_sq, p, r, 0, 0, 0, 0);
+                            addMove(moveList, move);
+                            move = encode_move(source_sq, target_sq, p, n, 0, 0, 0, 0);
+                            addMove(moveList, move);
+                            move = encode_move(source_sq, target_sq, p, b, 0, 0, 0, 0);
+                            addMove(moveList, move);
                         }
                         else //one move ahead, two move ahead
                         {
-                            std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[target_sq]<<" : Pawn push \n";
+                            // std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[target_sq]<<" : Pawn push \n";
+                            move = encode_move(source_sq, target_sq, p, 0, 0, 0, 0, 0);
+                            addMove(moveList, move);
                             if(source_sq>=a7 && source_sq<=h7) //two move is possible
                             {
                                 //can i push for 2 squares?
                                 target_sq = source_sq + 16;
-                                if(!get_bit(occupancies[both], target_sq)) std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[target_sq]<<" : Pawn double push \n"; 
+                                if(!get_bit(occupancies[both], target_sq)) 
+                                {
+                                    // std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[target_sq]<<" : Pawn double push \n"; 
+                                    move = encode_move(source_sq, target_sq, p, 0, 0, 1, 0, 0);
+                                    addMove(moveList, move);
+                                }    
                             }
                         }
 
@@ -960,15 +1131,34 @@ void generate_moves()
                             //Promotion capture
                             if(source_sq>=a2 && source_sq<=h2) 
                             {
-                                std::cout<< square_to_coordinates[source_sq]<<square_to_coordinates[target_attack]<<" : Pawn promotion caputre\n";
+                                // std::cout<< square_to_coordinates[source_sq]<<square_to_coordinates[target_attack]<<" : Pawn promotion caputre\n";
+                                move = encode_move(source_sq, target_attack, p, q, 1, 0, 0, 0);
+                                addMove(moveList, move);
+                                move = encode_move(source_sq, target_attack, p, r, 1, 0, 0, 0);
+                                addMove(moveList, move);
+                                move = encode_move(source_sq, target_attack, p, n, 1, 0, 0, 0);
+                                addMove(moveList, move);
+                                move = encode_move(source_sq, target_attack, p, b, 1, 0, 0, 0);
+                                addMove(moveList, move);
+
                             }
-                            else std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[target_attack]<<" : Pawn capture\n";
+                            else 
+                            {
+                                // std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[target_attack]<<" : Pawn capture\n";
+                                move = encode_move(source_sq, target_attack, p, 0, 1, 0, 0, 0);
+                                addMove(moveList, move);
+                            }
                             unset_bit(attack, target_attack);
                         }
                         if(enpassant_sq!= no_sq)
                         {
                             attack = (1ULL<<enpassant_sq) & pawn_attacks[black][source_sq];
-                            if(attack) std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[enpassant_sq]<<" : Enpassant capture\n";
+                            if(attack) 
+                            {
+                                // std::cout<<square_to_coordinates[source_sq]<<square_to_coordinates[enpassant_sq]<<" : Enpassant capture\n";
+                                move = encode_move(source_sq, enpassant_sq, p, 0, 1, 0, 1, 0);
+                                addMove(moveList, move);
+                            }
                         }
 
                     // Popping the lsb
@@ -978,19 +1168,22 @@ void generate_moves()
             }
             if(piece==k )
             {
-                    if(castle & bk)
+                if(castle & bk)
+                {
+                    if(!is_square_attacked(e8,white) && !is_square_attacked(f8,white) && !is_square_attacked(g8,white) && !(occupancies[both]&(1ULL<<f8)) && !(occupancies[both]&(1ULL<<g8)))
                     {
-                        if(get_bit(occupancies[both], f8) || get_bit(occupancies[both], g8)) std::cout<<"Not Possible 0-0 for black\n";
-                        else if(is_square_attacked(e8, white) || is_square_attacked(f8, white) || is_square_attacked(g8, white))  std::cout<<"Not Possible 0-0 for black\n";
-                        else std::cout<<"0-0 is possible for black\n";
+                        move = encode_move(e8, g8, k, 0, 0, 0, 0, 1);
+                        addMove(moveList, move);
                     }
-                    if(castle & bq)
+                }
+                if(castle & bq)
+                {
+                    if( !is_square_attacked(c8,white) &&  !is_square_attacked(d8,white) && !is_square_attacked(e8,white)  && !(occupancies[both]&(1ULL<<b8)) && !(occupancies[both]&(1ULL<<c8)) && !(occupancies[both]&(1ULL<<d8)))
                     {
-                        if(get_bit(occupancies[both], b8) || get_bit(occupancies[both], c8) || get_bit(occupancies[both], d8)) std::cout<<"Not Possible 0-0-0 for black\n";
-                        else if(is_square_attacked(e8, white) || is_square_attacked(d8, white) || is_square_attacked(c8, white))  std::cout<<"Not Possible 0-0-0 for black\n";
-                        else std::cout<<"0-0-0 is possible for black\n";
+                        move = encode_move(e8, c8, k, 0, 0, 0, 0, 1);
+                        addMove(moveList, move);
                     }
-                    if(!(castle&bk) && !(castle&bq)) std::cout<<"NO castling available for black\n";
+                }
             }
         }
 
@@ -1009,9 +1202,19 @@ void generate_moves()
                 {
                     int target_attack = get_ls1b(attack);
                     //quite move
-                    if(!get_bit(((side==white) ? occupancies[black] : occupancies[white]), target_attack)) std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Knight quite move "<<"\n";
-                    //Capture move
-                    else std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Knight capture move "<<"\n";
+                    if(!get_bit(((side==white) ? occupancies[black] : occupancies[white]), target_attack)) 
+                    {
+                        // std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Knight quite move "<<"\n";
+                        move = encode_move(source_sq, target_attack, piece, 0, 0, 0, 0, 0);
+                        addMove(moveList, move);
+                    }
+                        //Capture move
+                    else 
+                    {
+                        // std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Knight capture move "<<"\n";
+                        move = encode_move(source_sq, target_attack, piece, 0, 1, 0, 0, 0);
+                        addMove(moveList, move);
+                    }
                     unset_bit(attack, target_attack);
                 }
                 unset_bit(bitboard, source_sq);
@@ -1033,9 +1236,19 @@ void generate_moves()
                 {
                     int target_attack  = get_ls1b(attack);
                     //quite move
-                    if( !(get_bit(((side==white)?occupancies[black] : occupancies[white]),target_attack))) std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Bishop quite move "<<"\n";
-                    //capture move
-                    else std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Bishop capture move "<<"\n";
+                    if( !(get_bit(((side==white)?occupancies[black] : occupancies[white]),target_attack))) 
+                    {
+                        // std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Bishop quite move "<<"\n";
+                        move = encode_move(source_sq, target_attack, piece, 0, 0, 0, 0, 0);
+                        addMove(moveList, move);
+                    }
+                        //capture move
+                    else 
+                    {
+                        // std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Bishop capture move "<<"\n";
+                        move = encode_move(source_sq, target_attack, piece, 0, 1, 0, 0, 0);
+                        addMove(moveList, move);
+                    }
                     unset_bit(attack, target_attack);
                 }
                 unset_bit(bitboard, source_sq);
@@ -1051,15 +1264,25 @@ void generate_moves()
             {
                 source_sq = get_ls1b(bitboard);
                 attack = get_rook_attacks(source_sq, occupancies[both]);
-                attack &= ((side == white) ? ~occupancies[white] : occupancies[black]);
+                attack &= ((side == white) ? ~occupancies[white] : ~occupancies[black]);
                 
                 while(attack)
                 {
                     int target_attack = get_ls1b(attack);
                     //quite move
-                    if(!get_bit((side==white)?occupancies[black] : occupancies[white], target_sq)) std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Rook quite move "<<"\n";
-                    //capture move 
-                    else std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Rook capture move "<<"\n";
+                    if(!get_bit((side==white)?occupancies[black] : occupancies[white], target_attack)) 
+                    {
+                        // std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Rook quite move "<<"\n";
+                        move = encode_move(source_sq, target_attack, piece, 0, 0, 0, 0, 0);
+                        addMove(moveList, move);
+                    }
+                        //capture move 
+                    else 
+                    {
+                        // std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Rook capture move "<<"\n";
+                        move = encode_move(source_sq, target_attack, piece, 0, 1, 0, 0, 0);
+                        addMove(moveList, move);    
+                    }
                     unset_bit(attack, target_attack);
                 }
                 unset_bit(bitboard, source_sq);
@@ -1083,9 +1306,19 @@ void generate_moves()
                     int target_attack = get_ls1b(attack);
 
                     //quite move
-                    if(!get_bit(((side==white) ? occupancies[black] : occupancies[white]), target_attack)) std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Queen quite move "<<"\n";
+                    if(!get_bit(((side==white) ? occupancies[black] : occupancies[white]), target_attack)) 
+                    {
+                        // std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Queen quite move "<<"\n";
+                        move = encode_move(source_sq, target_attack, piece, 0, 0, 0, 0, 0);
+                        addMove(moveList, move);
+                    }    
                     //capture move
-                    else  std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Queen capture move "<<"\n";
+                    else  
+                    {
+                        // std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : Queen capture move "<<"\n";
+                        move = encode_move(source_sq, target_attack, piece, 0, 1, 0, 0, 0);
+                        addMove(moveList, move);
+                    }
                     unset_bit(attack, target_attack);
                 }
                 unset_bit(bitboard, source_sq);
@@ -1108,9 +1341,18 @@ void generate_moves()
                     int target_attack = get_ls1b(attack);
 
                     //quite move
-                    if(!get_bit(((side==white) ? occupancies[black] : occupancies[white]), target_attack)) std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : King quite move "<<"\n";
-                    //capture move
-                    else  std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : King capture move "<<"\n";
+                    if(!get_bit(((side==white) ? occupancies[black] : occupancies[white]), target_attack)) 
+                    {
+                        // std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : King quite move "<<"\n";
+                        move = encode_move(source_sq, target_attack, piece, 0, 0, 0, 0, 0);
+                        addMove(moveList, move);
+                    }    //capture move
+                    else  
+                    {
+                        // std::cout<<square_to_coordinates[source_sq]<< square_to_coordinates[target_attack]<<" : King capture move "<<"\n";
+                        move = encode_move(source_sq, target_attack, piece, 0, 1, 0, 0, 0);
+                        addMove(moveList, move);   
+                    }
                     unset_bit(attack, target_attack);
                 }
                 unset_bit(bitboard, source_sq);
@@ -1118,6 +1360,13 @@ void generate_moves()
         }
     }
 }
+
+
+
+
+
+
+
 
 // ===================================
 //             MAIN FUNC
@@ -1128,12 +1377,10 @@ int main()
     // init all
     init_all();
     
-    // parse custom FEN string
-    parser_fen("r2nk2r/p1ppqpb1/b3pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQk - 0 1 ");
-    print_board();
+    parser_fen(tricky_position);
+    moves moveList;
+    generate_moves(&moveList);
+    print_move_lists(&moveList);
     
-    // generate moves
-    generate_moves();
-
     return 0;
 }

@@ -1,5 +1,7 @@
 #include <iostream>
 #include <bitset>
+#include <cstring>
+#include <chrono> 
 
 #define U64 unsigned long long
 #define empty_board "8/8/8/8/8/8/8/8 w - - "
@@ -7,6 +9,15 @@
 #define tricky_position "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1 "
 #define killer_position "rnbqkb1r/pp1p1pPp/8/2p1pP2/1P1P4/3P3P/P1P1P3/RNBQKBNR w KQkq e6 0 1"
 #define cmk_position "r2q1rk1/ppp2ppp/2n1bn2/2b1p3/3pP3/3P1NPP/PPP1NPB1/R1BQ1RK1 b - - 0 9 "
+
+
+//function to get time in ms
+inline long long get_time_ms() 
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+}
 
 
 //board squares through chess notation and pieces
@@ -33,6 +44,21 @@ const char *square_to_coordinates[] = {
 
 enum{black,white, both};
 enum{bishop, rook};   
+enum{all_moves, only_captures};
+
+
+//For updating the castling rights after a particular move
+//If my source square is a8, then black queenside castle is no more valid move.(so &7 is done to castle)
+const int castling_rights[64] = {
+     7, 15, 15, 15,  3, 15, 15, 11,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    13, 15, 15, 15, 12, 15, 15, 14
+};
 
 
 // ===================================================================================
@@ -184,13 +210,13 @@ void init_promoted_pieces()
     int side_copy, enpassant_copy, castle_copy;                           \
     memcpy(bitboards_copy, bitboards, 96);                                \
     memcpy(occupancies_copy, occupancies, 24);                            \
-    side_copy = side, enpassant_copy = enpassant, castle_copy = castle;   \
+    side_copy = side, enpassant_copy = enpassant_sq, castle_copy = castle;   \
 
 // restore board state
 #define take_back()                                                       \
     memcpy(bitboards, bitboards_copy, 96);                                \
     memcpy(occupancies, occupancies_copy, 24);                            \
-    side = side_copy, enpassant = enpassant_copy, castle = castle_copy;   \
+    side = side_copy, enpassant_sq = enpassant_copy, castle = castle_copy;   \
 
 
 
@@ -818,18 +844,16 @@ static inline int is_square_attacked(int square, int side)
         if(pawn_attacks[black][square] & (bitboards[P])) return 1;
         if(knight_attacks[square] & bitboards[N]) return 1;
         if(king_attacks[square] & bitboards[K]) return 1;
-        if(get_bishop_attacks(square,occupancies[both]) & bitboards[B]) return 1;
-        if(get_rook_attacks(square,occupancies[both]) & bitboards[R] ) return 1;
-        if(get_queen_attacks(square,occupancies[both]) & bitboards[Q]) return 1; 
+        if(get_bishop_attacks(square,occupancies[both]) & (bitboards[B] | bitboards[Q])) return 1;
+        if(get_rook_attacks(square,occupancies[both]) & (bitboards[R] | bitboards[Q]) ) return 1;
     }
     else
     {
         if(pawn_attacks[white][square] & (bitboards[p])) return 1;
         if(knight_attacks[square] & bitboards[n]) return 1;
         if(king_attacks[square] & bitboards[k]) return 1;
-        if(get_bishop_attacks(square,occupancies[both]) & bitboards[b]) return 1;
-        if(get_rook_attacks(square,occupancies[both]) & bitboards[r] ) return 1;
-        if(get_queen_attacks(square,occupancies[both]) & bitboards[q]) return 1;    
+        if(get_bishop_attacks(square,occupancies[both]) & (bitboards[b] | bitboards[q])) return 1;
+        if(get_rook_attacks(square,occupancies[both]) &( bitboards[r] | bitboards[q])) return 1;
     }
     return 0; // Nobody is attacking this particular square.
 } 
@@ -945,6 +969,134 @@ static inline void addMove (moves* move_list, int move)
 
 
 
+// =======================================================================
+//                           Make moves
+// =======================================================================
+
+static inline int make_move(int move, int move_flag)
+{
+    if(move_flag==all_moves)
+    {
+
+        copy_board();
+        //extracting the data from the move which is generated from the move generator function
+        int source_sq = get_source(move);
+        int target_sq = get_target(move);
+        int piece = get_piece(move);
+        int promotion = get_promoted(move);
+        int capture = get_capture(move);
+        int double_push = get_doublePush(move);
+        int enpassant = get_enpassant(move);
+        int castling = get_castling(move);
+
+
+        //Removing the piece from source sq and putting at the target_sq
+        unset_bit(bitboards[piece], source_sq);
+        set_bit(bitboards[piece], target_sq);
+
+
+        // If captured --> Removing the bit which was captured 
+        if(capture)
+        {
+            int startPiece = ((side==white) ? startPiece=p : startPiece = P);
+            int endPiece = (side==white) ? endPiece=k : endPiece = K;
+
+            for(int i = startPiece; i<=endPiece; i++)
+            {
+                if(get_bit(bitboards[i], target_sq))
+                {
+                    unset_bit(bitboards[i], target_sq);
+                    break;
+                }
+            }
+        }
+
+        // If promoted --> Changing it to promoted piece
+        if(promotion)
+        {
+            (side==white) ? piece=P : piece = p;
+            unset_bit(bitboards[piece], target_sq);
+            set_bit(bitboards[promotion], target_sq); 
+        }
+        
+
+        //Handling enpassant move
+        if(enpassant)
+        {
+            int direction; 
+            (side==white) ? direction=8 : direction=-8;
+            (side==white) ? piece=p : piece = P;
+            unset_bit(bitboards[piece], enpassant_sq+direction);
+            
+        } 
+        enpassant_sq = no_sq;
+
+        if(double_push)
+        { 
+            int direction;
+            (side==white) ? direction=8 : direction=-8;
+            enpassant_sq = target_sq + direction;
+        }
+
+        if(castling)
+        {
+            switch (target_sq)
+            {
+                case g1 : 
+                    set_bit(bitboards[R], f1);
+                    unset_bit(bitboards[R], h1);
+                    break;
+                case c1 : 
+                    set_bit(bitboards[R], d1);
+                    unset_bit(bitboards[R], a1);
+                    break;
+                case g8 : 
+                    set_bit(bitboards[r], f8);
+                    unset_bit(bitboards[r], h8);
+                    break;
+                case c8 : 
+                    set_bit(bitboards[r], d8);
+                    unset_bit(bitboards[r], a8);
+                    break;
+                default : break;
+            }
+        }
+        
+        //Updating the castling rights
+        castle &= castling_rights[source_sq];
+        castle &= castling_rights[target_sq]; // to make sure rook is present.
+         
+
+        //Updating the occupancies 
+        memset(occupancies, 0ULL, 24);
+        for(int i=P; i<=K ; i++) occupancies[white] |= bitboards[i];
+        for(int i=p; i<=k ; i++) occupancies[black] |= bitboards[i];
+        occupancies[both] |= occupancies[white] | occupancies[black];
+
+
+
+        side^=1; // switiching the side, because attacker will be the oppossite side player
+
+
+        (side==white) ? piece = k: piece =K;
+        if(is_square_attacked(get_ls1b(bitboards[piece]),  side)) 
+        {
+            take_back();
+            return 0;
+        }
+        else return 1; 
+
+    }
+    else
+    {
+        if(get_capture(move)) return make_move(move, all_moves);
+        else return 0;
+    }
+    
+    
+}
+
+
 
 // =======================================================================
 //                             Generating moves
@@ -952,14 +1104,14 @@ static inline void addMove (moves* move_list, int move)
 void generate_moves(moves* moveList)
 {
     moveList->count = 0;
-
     int source_sq, target_sq;
     U64 bitboard, attack;
     int move;
 
-   
+    int start_piece = (side == white) ? P : p;
+    int end_piece   = (side == white) ? K : k;
     
-    for(int piece = P; piece<=k; piece++)
+    for(int piece = start_piece; piece<=end_piece; piece++)
     {
         
         if(side==white)
@@ -1361,8 +1513,66 @@ void generate_moves(moves* moveList)
     }
 }
 
+// ==============================================================================
+//                                 PERFT FUNCTION
+// ==============================================================================
+
+//Perft driver : To get number of nodes traversed. Node--> I particular branch for a move until the depth becomes zero.
+long  nodes=0;
+static inline void perft_driver(int depth)
+{
+    
+    if(depth==0)
+    {
+        nodes++; 
+        return;
+    }
+
+    moves moveList;
+    generate_moves(&moveList);
+
+    for(int counter = 0; counter<moveList.count; counter++)
+    {
+        copy_board();
+        if(!make_move(moveList.list[counter], all_moves)) continue;
+        perft_driver(depth-1);
+        take_back();
+    }
+    return;
+}
 
 
+//Perft test
+void perft_test(int depth)
+{
+    moves moveList;
+    generate_moves(&moveList);
+
+    int sTime = get_time_ms();
+    
+    std::cout<<"\n          Perfomance test \n\n";
+
+    for(int counter = 0; counter<moveList.count; counter++)
+    {
+        copy_board();
+        if(!make_move(moveList.list[counter], all_moves)) continue;
+        long node_count_till_now  = nodes;
+        perft_driver(depth-1);
+        long total_nodes_for_move = nodes - node_count_till_now;
+        take_back();
+        
+
+        
+        std::cout<<"    move:"<<square_to_coordinates[get_source(moveList.list[counter])]
+                 <<square_to_coordinates[get_target(moveList.list[counter])]
+                 <<"        nodes: "<<total_nodes_for_move
+                 <<"\n";
+    }   
+    int eTime = get_time_ms();
+    std::cout<<"\n    Depth : "<<depth<<"\n";
+    std::cout<<"    Total Nodes : "<<nodes<<"\n";
+    std::cout<<"    Time taken : "<<eTime - sTime<<"\n";
+}
 
 
 
@@ -1376,11 +1586,9 @@ int main()
 {
     // init all
     init_all();
-    
+
     parser_fen(tricky_position);
-    moves moveList;
-    generate_moves(&moveList);
-    print_move_lists(&moveList);
-    
+    perft_test(6);
+
     return 0;
 }

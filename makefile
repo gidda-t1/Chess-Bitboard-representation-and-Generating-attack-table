@@ -3,3 +3,4 @@ all:
 
 debug:
 	g++ engine.cpp -o engine
+
